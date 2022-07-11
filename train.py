@@ -7,20 +7,25 @@ import torch
 import numpy as np
 
 import gym
-import roboschool
 
 from PPO import PPO
+
+from point_sim import PointSim
+from disctiminator import Discriminator
+import copy, pickle
+
+from tensorboardX import SummaryWriter
 
 ################################### Training ###################################
 def train():
     print("============================================================================================")
 
     ####### initialize environment hyperparameters ######
-    env_name = "RoboschoolWalker2d-v1"
+    env_name = "PointSim"
 
     has_continuous_action_space = True  # continuous action space; else discrete
 
-    max_ep_len = 1000                   # max timesteps in one episode
+    max_ep_len = 200                   # max timesteps in one episode
     max_training_timesteps = int(3e6)   # break training loop if timeteps > max_training_timesteps
 
     print_freq = max_ep_len * 10        # print avg reward in the interval (in num timesteps)
@@ -36,7 +41,7 @@ def train():
     ## Note : print/log frequencies should be > than max_ep_len
 
     ################ PPO hyperparameters ################
-    update_timestep = max_ep_len * 4      # update policy every n timesteps
+    update_timestep = max_ep_len * 2     # update policy every n timesteps
     K_epochs = 80               # update policy for K epochs in one PPO update
 
     eps_clip = 0.2          # clip parameter for PPO
@@ -50,7 +55,7 @@ def train():
 
     print("training environment name : " + env_name)
 
-    env = gym.make(env_name)
+    env = PointSim()
 
     # state space dimension
     state_dim = env.observation_space.shape[0]
@@ -61,6 +66,9 @@ def train():
     else:
         action_dim = env.action_space.n
 
+    discrim = Discriminator(lr=.0001, input_dims=(3,), layer1_size=256, layer2_size=256)
+    agent2 = pickle.load(open("point_minus20_noCDF_lowLR_20scale_4000.p", "rb" ))
+    discrim.discriminator = copy.deepcopy(agent2.discriminator)
     ###################### logging ######################
 
     #### log files for multiple runs are NOT overwritten
@@ -144,6 +152,9 @@ def train():
     # initialize a PPO agent
     ppo_agent = PPO(state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, has_continuous_action_space, action_std)
 
+    # initialize tensorboard
+    writer = SummaryWriter()
+
     # track total training time
     start_time = datetime.now().replace(microsecond=0)
     print("Started training at (GMT) : ", start_time)
@@ -164,24 +175,38 @@ def train():
     time_step = 0
     i_episode = 0
 
+    old_reward = -100
     # training loop
     while time_step <= max_training_timesteps:
 
         state = env.reset()
         current_ep_reward = 0
+        limit_factor = np.random.uniform(low=0, high=1)
+        state = np.concatenate((state, [limit_factor]))
+        state_ = state
 
+        episode_timesteps = 0
         for t in range(1, max_ep_len+1):
 
             # select action with policy
             action = ppo_agent.select_action(state)
             state, reward, done, _ = env.step(action)
+            state = np.concatenate((state, [limit_factor]))
 
+            temp_rew = reward
+            if temp_rew <= old_reward:
+                temp_rew = -20
+            else:
+                temp_rew = 0 
+            
+            temp_rew = discrim.calculate_reward(state_, temp_rew, -19)
             # saving reward and is_terminals
-            ppo_agent.buffer.rewards.append(reward)
+            ppo_agent.buffer.rewards.append(temp_rew)
             ppo_agent.buffer.is_terminals.append(done)
 
             time_step +=1
             current_ep_reward += reward
+            episode_timesteps += 1
 
             # update PPO agent
             if time_step % update_timestep == 0:
@@ -203,6 +228,12 @@ def train():
 
                 log_running_reward = 0
                 log_running_episodes = 0
+
+            discrim.remember(state, action, reward, state_, done)
+            # if time_step % 2005 == 0:
+            #     disc_loss, log_probs = discrim.learn()
+            #     writer.add_scalar('discriminator_loss', disc_loss, time_step)
+            #     writer.add_scalar('log_probs', log_probs, time_step)
 
             # printing average reward
             if time_step % print_freq == 0:
@@ -229,6 +260,10 @@ def train():
             if done:
                 break
 
+            state_ = state
+            old_reward = reward
+
+        print("LF: ", limit_factor, " time_steps: ", episode_timesteps)
         print_running_reward += current_ep_reward
         print_running_episodes += 1
 
