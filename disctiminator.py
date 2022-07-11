@@ -64,9 +64,10 @@ class Discriminator():
         limit_factor = torch.clone(state)
         limit_factor = state[:, -1]
         limit_factor = limit_factor[:,None]
-        disc_predictions, log_probs, dist = self.discriminator.predict(disc_state, requires_grad=False)
         # x-vel
         disc_state = disc_state[:, 1:2]
+        #print(disc_state)
+        disc_predictions, log_probs, dist = self.discriminator.predict(disc_state, requires_grad=False)
         log_probs.to('cuda:0' if torch.cuda.is_available() else 'cpu')
         rew=-torch.log(torch.clamp(torch.abs(disc_predictions-limit_factor), min=.0000001, max=.99999))
         if torch.any(torch.isinf(rew)) or torch.any(torch.isnan(rew)):
@@ -76,7 +77,7 @@ class Discriminator():
         
         #print(rew)
         rew = (rew[:,-1])*20
-        rew = torch.where(reward<rew_threshold, reward*22, rew)
+        rew = torch.where(reward<rew_threshold, reward*2, rew)
 
         return rew.item()
     def save_models(self):
